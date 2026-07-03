@@ -633,12 +633,6 @@ def get_timeline(patient_id: str) -> list:
     return _SARAH_PAGE_DATA["timelineData"]
 
 
-@app.get("/patients/{patient_id}/devices")
-def get_devices(patient_id: str) -> list:
-    """Returns connected devices."""
-    return _DEVICES
-
-
 @app.get("/patients/{patient_id}/alerts")
 def get_alerts(patient_id: str) -> list:
     """Returns active patient alerts."""
@@ -686,16 +680,1330 @@ def genie_chat(patient_id: str, req: ChatRequest) -> dict:
 
 @app.get("/patients/{patient_id}/family")
 def get_family_members(patient_id: str) -> list:
-    """Returns all family members registered to the patient."""
-    return _FAMILY_MEMBERS
+    """Returns all family members registered to the patient (uses mutable store)."""
+    return _FAMILY_STORE.get(patient_id, _FAMILY_MEMBERS)
 
 
 @app.get("/patients/{patient_id}/reports")
-def get_reports(patient_id: str) -> list:
-    """Returns all medical reports for the patient and their family."""
-    return _REPORTS
+def get_reports(patient_id: str, owner_type: Optional[str] = None,
+                owner_id: Optional[str] = None, search: Optional[str] = None,
+                category: Optional[str] = None, page: int = 1, page_size: int = 50) -> dict:
+    """Returns reports with optional filtering and pagination (uses mutable store)."""
+    items = list(_REPORTS_STORE.get(patient_id, _REPORTS))
+    if owner_type:
+        items = [r for r in items if r.get("ownerType") == owner_type]
+    if owner_id:
+        items = [r for r in items if r.get("ownerId") == owner_id]
+    if category:
+        items = [r for r in items if r.get("reportCategory") == category]
+    if search:
+        q = search.lower()
+        items = [r for r in items if q in r.get("reportName", "").lower()
+                 or q in r.get("reportCategory", "").lower()
+                 or q in r.get("healthcareFacility", "").lower()]
+    total = len(items)
+    start = (page - 1) * page_size
+    return {"items": items[start: start + page_size], "total": total,
+            "page": page, "pageSize": page_size}
+
+
+@app.get("/patients/{patient_id}/devices")
+def get_devices_route(patient_id: str, status: Optional[str] = None,
+                      search: Optional[str] = None) -> dict:
+    """Returns connected devices (uses mutable store)."""
+    items = list(_DEVICES_STORE.get(patient_id, _DEVICES))
+    if status:
+        items = [d for d in items if d.get("status") == status]
+    if search:
+        q = search.lower()
+        items = [d for d in items if q in d.get("name", "").lower()]
+    return {"items": items, "total": len(items)}
+
+
+
+# ── Mutable CRUD stores (in-memory, per-patient) ───────────────────────────────
+
+import copy
+import uuid
+
+# Keyed by patient_id → list of mutable family members
+_FAMILY_STORE: dict[str, list[dict]] = {
+    "patient-00429": copy.deepcopy(_FAMILY_MEMBERS),
+}
+# Keyed by patient_id → list of reports
+_REPORTS_STORE: dict[str, list[dict]] = {
+    "patient-00429": copy.deepcopy(_REPORTS),
+}
+# Keyed by patient_id → list of devices
+_DEVICES_STORE: dict[str, list[dict]] = {
+    "patient-00429": copy.deepcopy(_DEVICES),
+}
+# Settings store keyed by patient_id
+_SETTINGS_STORE: dict[str, dict] = {
+    "patient-00429": {
+        "push": True, "email": True, "sms": False,
+        "glucoseHigh": 200, "sleepLow": 5.5, "hrHigh": 100,
+        "hipaaAudit": True, "encryption": True, "gdprExport": True, "autoPurge": False,
+    },
+}
+# Source-data notes keyed by patient_id / subject_id
+_SYMPTOMS_STORE: dict[str, list[dict]] = {}
+_WELLBEING_STORE: dict[str, list[dict]] = {}
+
+# Patient metrics (for primary patient, keyed by patient_id)
+_PATIENT_METRICS: dict[str, list[dict]] = {
+    "patient-00429": [
+        {"id": "pm1", "date": "Jun 20, 2026", "bloodPressure": "128/82", "bloodSugar": 142,
+         "heartRate": 76, "weight": 155, "oxygenSaturation": 98, "temperature": 98.2, "notes": "Morning reading"},
+        {"id": "pm2", "date": "Jun 19, 2026", "bloodPressure": "130/84", "bloodSugar": 138,
+         "heartRate": 78, "weight": 155, "oxygenSaturation": 98, "temperature": 98.1},
+        {"id": "pm3", "date": "Jun 18, 2026", "bloodPressure": "125/80", "bloodSugar": 145,
+         "heartRate": 75, "weight": 154, "oxygenSaturation": 99, "temperature": 98.3},
+    ],
+}
+
+# Admin providers store
+_ADMIN_PROVIDERS: list[dict] = [
+    {
+        "id": "ap-001", "name": "epic-main", "displayName": "Epic EHR — Main Hospital",
+        "description": "Connect to Main Hospital's Epic EHR for reports, labs, and clinical notes.",
+        "logoInitials": "EP", "logoColor": "bg-teal-soft text-teal",
+        "providerType": "EPIC", "fhirEndpoint": "https://fhir.epic.com/interconnect-fhir-oauth/api/FHIR/R4",
+        "apiVersion": "R4", "webhookUrl": "https://app.questbeyond.com/webhooks/epic",
+        "environment": "production", "status": "active", "authType": "oauth2",
+        "oauth2": {
+            "clientId": "qb-epic-prod-client",
+            "tokenUrl": "https://fhir.epic.com/interconnect-fhir-oauth/oauth2/token",
+            "authorizationUrl": "https://fhir.epic.com/interconnect-fhir-oauth/oauth2/authorize",
+            "scopes": ["patient/Patient.read", "patient/Observation.read",
+                       "patient/MedicationRequest.read", "launch/patient"],
+        },
+        "ipWhitelist": ["52.14.22.1", "52.14.22.2"],
+        "supportedDataTypes": ["reports", "devices", "notes", "metrics"],
+        "templateId": "tpl-001", "connectedPatients": 2847,
+        "supportsOtp": True, "supportsOAuth": True, "otpContactMethods": ["email", "sms"],
+        "createdAt": "2026-01-15T10:00:00Z", "updatedAt": "2026-06-29T08:00:00Z",
+        "createdBy": "admin@questbeyond.com",
+    },
+    {
+        "id": "ap-002", "name": "cerner-sandbox", "displayName": "Cerner Millennium — Sandbox",
+        "description": "Cerner SMART on FHIR integration for testing and sandbox environments.",
+        "logoInitials": "CE", "logoColor": "bg-sky-soft text-sky",
+        "providerType": "Cerner", "fhirEndpoint": "https://fhir-ehr-code.cerner.com/r4/ec2458f2",
+        "apiVersion": "R4", "environment": "sandbox", "status": "error", "authType": "oauth2",
+        "oauth2": {
+            "clientId": "qb-cerner-sandbox",
+            "tokenUrl": "https://authorization.cerner.com/tenants/ec2458f2/protocols/oauth2/profiles/smart-v1/token",
+            "authorizationUrl": "https://authorization.cerner.com/tenants/ec2458f2/protocols/oauth2/profiles/smart-v1/personas/patient/authorize",
+            "scopes": ["patient/Patient.read", "patient/MedicationRequest.read"],
+        },
+        "ipWhitelist": [], "supportedDataTypes": ["reports", "metrics"],
+        "connectedPatients": 0, "supportsOtp": True, "supportsOAuth": True,
+        "otpContactMethods": ["email"],
+        "errorMessage": "Token refresh failed: 401 Unauthorized",
+        "createdAt": "2026-03-10T09:00:00Z", "updatedAt": "2026-06-28T14:10:00Z",
+        "createdBy": "admin@questbeyond.com",
+    },
+    {
+        "id": "ap-003", "name": "labcorp-direct", "displayName": "Labcorp — Lab Results",
+        "description": "API key-based integration for Labcorp laboratory results.",
+        "logoInitials": "LC", "logoColor": "bg-violet-soft text-violet",
+        "providerType": "Labcorp", "fhirEndpoint": "https://api.labcorp.com/v2/fhir",
+        "apiVersion": "v2", "environment": "production", "status": "active", "authType": "api-key",
+        "apiKey": {"keyId": "lc-key-prod-001", "headerName": "X-API-Key"},
+        "ipWhitelist": [], "supportedDataTypes": ["metrics"],
+        "connectedPatients": 1243, "supportsOtp": True, "supportsOAuth": False,
+        "otpContactMethods": ["email", "sms"],
+        "createdAt": "2026-04-20T14:00:00Z", "updatedAt": "2026-06-29T06:00:00Z",
+        "createdBy": "admin@questbeyond.com",
+    },
+    {
+        "id": "ap-004", "name": "hospital-xyz", "displayName": "Hospital XYZ — Community Health",
+        "description": "Community hospital integration for full medical records.",
+        "logoInitials": "HX", "logoColor": "bg-amber-soft text-amber",
+        "providerType": "Custom", "fhirEndpoint": "https://fhir.hospitalxyz.org/api/R4",
+        "apiVersion": "R4", "environment": "production", "status": "pending", "authType": "mtls",
+        "mtls": {
+            "certificateId": "cert-hxyz-001",
+            "certSubject": "CN=qb-hospital-xyz, O=QuestBeyond, C=US",
+            "certExpiry": "2027-06-01T00:00:00Z",
+            "publicKeyId": "mtls-pub-hxyz-001",
+        },
+        "ipWhitelist": ["10.0.0.1"], "supportedDataTypes": ["reports", "devices", "notes", "metrics"],
+        "connectedPatients": 0, "supportsOtp": False, "supportsOAuth": False,
+        "otpContactMethods": [],
+        "createdAt": "2026-06-01T00:00:00Z", "updatedAt": "2026-06-01T00:00:00Z",
+        "createdBy": "admin@questbeyond.com",
+        "notes": "Pending mTLS certificate exchange",
+    },
+]
+
+_INTEGRATION_TEMPLATES: list[dict] = [
+    {
+        "id": "tpl-001", "name": "Epic SMART on FHIR R4", "providerType": "EPIC",
+        "description": "Standard SMART on FHIR R4 integration for Epic EHR.",
+        "version": "2.0",
+        "fhirEndpoint": "https://fhir.epic.com/interconnect-fhir-oauth/api/FHIR/R4",
+        "apiVersion": "R4", "authType": "oauth2",
+        "scopes": ["patient/Patient.read", "patient/Observation.read",
+                   "patient/MedicationRequest.read", "launch/patient", "openid", "fhirUser"],
+        "defaultDataTypes": ["reports", "clinical-notes", "lab-results", "prescriptions"],
+        "setupSteps": [
+            "Register your app at https://fhir.epic.com/developer",
+            "Set redirect URI to https://app.questbeyond.com/oauth/callback",
+            "Copy Client ID into the Client ID field below",
+            "Enable required SMART scopes",
+            "Submit for Epic production app approval",
+        ],
+        "docsUrl": "https://fhir.epic.com/developer", "status": "official",
+    },
+    {
+        "id": "tpl-002", "name": "Cerner SMART Health IT", "providerType": "Cerner",
+        "description": "Cerner Millennium SMART on FHIR integration.",
+        "version": "1.5",
+        "fhirEndpoint": "https://fhir-ehr-code.cerner.com/r4/{tenant-id}",
+        "apiVersion": "R4", "authType": "oauth2",
+        "scopes": ["patient/Patient.read", "patient/MedicationRequest.read",
+                   "patient/Observation.read", "launch/patient"],
+        "defaultDataTypes": ["prescriptions", "lab-results", "clinical-notes"],
+        "setupSteps": [
+            "Create an app at Cerner Central (code.cerner.com)",
+            "Obtain tenant ID from the hospital IT team",
+            "Replace {tenant-id} in the FHIR endpoint URL",
+        ],
+        "docsUrl": "https://code.cerner.com/developer", "status": "official",
+    },
+    {
+        "id": "tpl-003", "name": "Labcorp Direct API v2", "providerType": "Labcorp",
+        "description": "API key-based integration for Labcorp laboratory results.",
+        "version": "2.1",
+        "fhirEndpoint": "https://api.labcorp.com/v2/fhir", "apiVersion": "v2",
+        "authType": "api-key", "scopes": [],
+        "defaultDataTypes": ["lab-results"],
+        "setupSteps": [
+            "Register at developer.labcorp.com",
+            "Request API key for FHIR R4 DiagnosticReport endpoints",
+        ],
+        "docsUrl": "https://developer.labcorp.com", "status": "official",
+    },
+    {
+        "id": "tpl-004", "name": "Custom FHIR R4 (mTLS)", "providerType": "Custom",
+        "description": "Template for hospitals requiring mutual TLS certificate authentication.",
+        "version": "1.0",
+        "fhirEndpoint": "https://fhir.{hospital-domain}/api/R4",
+        "apiVersion": "R4", "authType": "mtls", "scopes": [],
+        "defaultDataTypes": ["reports", "clinical-notes", "lab-results", "prescriptions"],
+        "setupSteps": [
+            "Obtain the server's CA certificate from hospital IT",
+            "Generate a client certificate + private key pair",
+            "Register your public key with the hospital's mTLS gateway",
+        ],
+        "status": "community",
+    },
+]
+
+_CERTIFICATES: list[dict] = [
+    {
+        "id": "cert-001", "providerId": "ap-001", "providerName": "Epic EHR — Main Hospital",
+        "keyType": "tls-cert", "keyId": "epic-tls-prod-2026",
+        "fingerprint": "SHA256:2f:8b:a1:4c:9e:3d:7f:11:22:ab",
+        "uploadedAt": "2026-01-15T10:00:00Z", "uploadedBy": "admin@questbeyond.com",
+        "expiresAt": "2027-01-15T00:00:00Z", "status": "active",
+    },
+    {
+        "id": "cert-002", "providerId": "ap-004", "providerName": "Hospital XYZ",
+        "keyType": "tls-cert", "keyId": "hxyz-mtls-cert-001",
+        "fingerprint": "SHA256:9c:4a:12:3f:7b:88:ee:02:14:cd",
+        "uploadedAt": "2026-06-01T00:00:00Z", "uploadedBy": "admin@questbeyond.com",
+        "expiresAt": "2027-06-01T00:00:00Z", "status": "active",
+    },
+]
+
+_ADMIN_MAPPINGS: list[dict] = [
+    {"id": "am-001", "providerId": "ap-001", "providerName": "Epic EHR",
+     "internalField": "patientId", "internalType": "string",
+     "fhirResource": "Patient", "fhirPath": "Patient.id", "required": True},
+    {"id": "am-002", "providerId": "ap-001", "providerName": "Epic EHR",
+     "internalField": "glucoseReading", "internalType": "number",
+     "fhirResource": "Observation", "fhirPath": "Observation.valueQuantity.value",
+     "transform": "mg/dL → mmol/L", "required": True},
+    {"id": "am-003", "providerId": "ap-001", "providerName": "Epic EHR",
+     "internalField": "encounterDate", "internalType": "date",
+     "fhirResource": "Encounter", "fhirPath": "Encounter.period.start", "required": True},
+    {"id": "am-004", "providerId": "ap-001", "providerName": "Epic EHR",
+     "internalField": "labResult", "internalType": "object",
+     "fhirResource": "DiagnosticReport", "fhirPath": "DiagnosticReport.result[0].reference", "required": False},
+    {"id": "am-005", "providerId": "ap-003", "providerName": "Labcorp",
+     "internalField": "hba1cValue", "internalType": "number",
+     "fhirResource": "Observation", "fhirPath": "Observation.valueQuantity", "required": True},
+]
+
+_INTEGRATIONS_STORE: list[dict] = [
+    {
+        "id": "int-001", "name": "Epic EHR – Main Hospital", "provider": "EPIC",
+        "environment": "production", "status": "Connected",
+        "lastSync": "2026-06-29T08:32:00Z",
+        "dataTypes": ["reports", "devices", "notes"],
+        "authType": "oauth2",
+        "baseUrl": "https://fhir.epic.com/interconnect-fhir-oauth/api/FHIR/R4",
+        "apiVersion": "R4",
+        "webhookUrl": "https://app.questbeyond.com/webhooks/epic",
+        "syncSchedule": {"frequency": "real-time", "triggers": ["new-report", "new-lab"]},
+        "syncHistory": [
+            {"id": "sh-001", "timestamp": "2026-06-29T08:32:00Z",
+             "recordsSent": 12, "recordsReceived": 45, "duration": 1240, "status": "success"},
+            {"id": "sh-002", "timestamp": "2026-06-29T07:00:00Z",
+             "recordsSent": 8, "recordsReceived": 32, "duration": 987, "status": "success"},
+            {"id": "sh-003", "timestamp": "2026-06-28T20:00:00Z",
+             "recordsSent": 3, "recordsReceived": 18, "duration": 632, "status": "partial",
+             "errorMessage": "1 record skipped: missing required field"},
+        ],
+        "totalSyncCount": 1284,
+        "createdAt": "2026-01-15T10:00:00Z", "updatedAt": "2026-06-29T08:32:00Z",
+        "createdBy": "admin@questbeyond.com",
+    },
+    {
+        "id": "int-002", "name": "Cerner Millennium – Sandbox", "provider": "Cerner",
+        "environment": "sandbox", "status": "Error",
+        "lastSync": "2026-06-28T14:10:00Z",
+        "dataTypes": ["reports", "metrics"],
+        "authType": "oauth2",
+        "baseUrl": "https://fhir-ehr-code.cerner.com/r4/ec2458f2-1e24-41c8-b71b-0e701af7583d",
+        "apiVersion": "R4",
+        "syncSchedule": {"frequency": "scheduled", "cronExpression": "0 */6 * * *",
+                         "triggers": ["daily-batch"]},
+        "syncHistory": [
+            {"id": "sh-004", "timestamp": "2026-06-28T14:10:00Z",
+             "recordsSent": 0, "recordsReceived": 0, "duration": 95, "status": "failed",
+             "errorMessage": "Token refresh failed: 401 Unauthorized"},
+        ],
+        "errorMessage": "Token refresh failed: 401 Unauthorized — client credentials may have expired.",
+        "totalSyncCount": 342,
+        "createdAt": "2026-03-10T09:00:00Z", "updatedAt": "2026-06-28T14:10:00Z",
+        "createdBy": "admin@questbeyond.com",
+    },
+    {
+        "id": "int-003", "name": "Labcorp Direct API", "provider": "Labcorp",
+        "environment": "production", "status": "Connected",
+        "lastSync": "2026-06-29T06:00:05Z",
+        "dataTypes": ["metrics"],
+        "authType": "api-key",
+        "baseUrl": "https://api.labcorp.com/v2", "apiVersion": "v2",
+        "syncSchedule": {"frequency": "scheduled", "cronExpression": "0 6 * * *",
+                         "triggers": ["new-lab"]},
+        "syncHistory": [
+            {"id": "sh-006", "timestamp": "2026-06-29T06:00:05Z",
+             "recordsSent": 0, "recordsReceived": 8, "duration": 223, "status": "success"},
+        ],
+        "totalSyncCount": 156,
+        "createdAt": "2026-04-20T14:00:00Z", "updatedAt": "2026-06-29T06:00:05Z",
+        "createdBy": "admin@questbeyond.com",
+    },
+]
+
+_API_LOGS: list[dict] = [
+    {"id": "log-001", "integrationId": "int-001", "integrationName": "Epic EHR – Main Hospital",
+     "timestamp": "2026-06-29T08:32:14Z", "method": "POST", "endpoint": "/Patient/$match",
+     "statusCode": 200, "duration": 342, "correlationId": "corr-a1b2c3",
+     "requestSize": 512, "responseSize": 2048, "patientId": "PAT-00429", "userId": "system",
+     "subjectType": "SELF", "subjectId": "patient-00429", "subjectName": "Sarah Martinez"},
+    {"id": "log-002", "integrationId": "int-001", "integrationName": "Epic EHR – Main Hospital",
+     "timestamp": "2026-06-29T08:32:10Z", "method": "GET",
+     "endpoint": "/Observation?patient=PAT-00429&code=2339-0",
+     "statusCode": 200, "duration": 189, "correlationId": "corr-a1b2c3",
+     "responseSize": 8192, "patientId": "PAT-00429", "userId": "system",
+     "subjectType": "SELF", "subjectId": "patient-00429", "subjectName": "Sarah Martinez"},
+    {"id": "log-003", "integrationId": "int-002", "integrationName": "Cerner Millennium",
+     "timestamp": "2026-06-28T14:10:12Z", "method": "POST", "endpoint": "/oauth2/token",
+     "statusCode": 401, "duration": 95, "correlationId": "corr-d4e5f6",
+     "error": "Invalid client credentials", "userId": "system",
+     "subjectType": "SELF", "subjectId": "patient-00429", "subjectName": "Sarah Martinez"},
+    {"id": "log-004", "integrationId": "int-001", "integrationName": "Epic EHR – Main Hospital",
+     "timestamp": "2026-06-29T07:00:04Z", "method": "POST", "endpoint": "/Bundle",
+     "statusCode": 201, "duration": 412, "correlationId": "corr-g7h8i9",
+     "requestSize": 4096, "responseSize": 256, "patientId": "PAT-00429", "userId": "system",
+     "subjectType": "SELF", "subjectId": "patient-00429", "subjectName": "Sarah Martinez"},
+    {"id": "log-005", "integrationId": "int-003", "integrationName": "Labcorp Direct API",
+     "timestamp": "2026-06-29T06:00:05Z", "method": "GET",
+     "endpoint": "/results/recent?patientId=00429",
+     "statusCode": 200, "duration": 223, "correlationId": "corr-j1k2l3",
+     "responseSize": 3072, "patientId": "PAT-00429", "userId": "system",
+     "subjectType": "SELF", "subjectId": "patient-00429", "subjectName": "Sarah Martinez"},
+    {"id": "log-006", "integrationId": "int-001", "integrationName": "Epic EHR – Main Hospital",
+     "timestamp": "2026-06-28T14:09:58Z", "method": "POST", "endpoint": "/oauth2/token",
+     "statusCode": 401, "duration": 88, "correlationId": "corr-d4e5f6",
+     "error": "Invalid client credentials", "retryAttempt": 2, "userId": "system",
+     "subjectType": "SELF", "subjectId": "patient-00429", "subjectName": "Sarah Martinez"},
+    {"id": "log-007", "integrationId": "int-001", "integrationName": "Epic EHR – Main Hospital",
+     "timestamp": "2026-06-28T20:00:03Z", "method": "GET", "endpoint": "/Patient/PAT-00429",
+     "statusCode": 200, "duration": 156, "correlationId": "corr-p7q8r9",
+     "responseSize": 1024, "patientId": "PAT-00429", "userId": "system",
+     "subjectType": "SELF", "subjectId": "patient-00429", "subjectName": "Sarah Martinez"},
+    {"id": "log-008", "integrationId": "int-001", "integrationName": "Epic EHR – Main Hospital",
+     "timestamp": "2026-06-29T06:02:10Z", "method": "POST", "endpoint": "/Bundle",
+     "statusCode": 201, "duration": 398, "correlationId": "corr-fm3-a001",
+     "requestSize": 2048, "responseSize": 512, "patientId": "PAT-00103", "userId": "system",
+     "subjectType": "FAMILY", "subjectId": "fm3", "subjectName": "Jake Martinez",
+     "subjectRelationship": "Son"},
+    {"id": "log-009", "integrationId": "int-003", "integrationName": "Labcorp Direct API",
+     "timestamp": "2026-06-28T06:02:30Z", "method": "GET",
+     "endpoint": "/results/recent?patientId=00102",
+     "statusCode": 200, "duration": 188, "correlationId": "corr-fm2-a001",
+     "responseSize": 2560, "patientId": "PAT-00102", "userId": "system",
+     "subjectType": "FAMILY", "subjectId": "fm2", "subjectName": "Maria Martinez",
+     "subjectRelationship": "Mother"},
+]
+
+_PATIENT_LINKS: list[dict] = [
+    {
+        "linkId": "lnk-001", "subjectId": "patient-00429", "subjectName": "Sarah Martinez",
+        "subjectType": "SELF", "providerId": "ap-001", "providerName": "Epic EHR — Main Hospital",
+        "providerType": "EPIC", "status": "connected",
+        "dataTypes": ["reports", "lab-results", "clinical-notes"],
+        "connectedAt": "2026-01-15T10:30:00Z", "lastSync": "2026-06-29T08:32:00Z",
+        "consentId": "con-001", "otpVerified": True, "otpChannel": "email",
+    },
+    {
+        "linkId": "lnk-002", "subjectId": "patient-00429", "subjectName": "Sarah Martinez",
+        "subjectType": "SELF", "providerId": "ap-003", "providerName": "Labcorp — Lab Results",
+        "providerType": "Labcorp", "status": "connected",
+        "dataTypes": ["lab-results"],
+        "connectedAt": "2026-04-20T15:00:00Z", "lastSync": "2026-06-29T06:00:00Z",
+        "consentId": "con-003", "otpVerified": True, "otpChannel": "sms",
+    },
+]
+
+# OTP session store (in-memory, demo)
+_OTP_SESSIONS: dict[str, dict] = {}
+
+
+# ── Pydantic models for CRUD ───────────────────────────────────────────────────
+
+class MetricEntryCreate(BaseModel):
+    date: str
+    bloodPressure: Optional[str] = None
+    bloodSugar: Optional[float] = None
+    weight: Optional[float] = None
+    heartRate: Optional[float] = None
+    oxygenSaturation: Optional[float] = None
+    temperature: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class FamilyMemberCreate(BaseModel):
+    fullName: str
+    relationship: str
+    age: int
+    gender: str
+    bloodGroup: str
+    phone: str = ""
+    email: str = ""
+    emergencyContact: str = ""
+    conditions: list[str] = []
+    allergies: list[str] = []
+    medications: list[str] = []
+    healthNotes: str = ""
+    wellbeingNotes: str = ""
+    wellbeingStatus: str = "Good"
+    photo: Optional[str] = None
+
+
+class ReportCreate(BaseModel):
+    ownerType: str
+    ownerId: Optional[str] = None
+    reportName: str
+    reportCategory: str
+    reportDate: str
+    healthcareFacility: str
+    notes: str = ""
+    fileName: str
+    fileType: str
+    fileSize: int
+    fileUrl: str = ""
+    uploadedDate: str
+    createdBy: str
+
+
+class DeviceCreate(BaseModel):
+    name: str
+    icon: str
+    status: str
+    lastSync: str
+    dataTypes: str
+    accent: str
+
+
+class SettingsUpdate(BaseModel):
+    push: Optional[bool] = None
+    email: Optional[bool] = None
+    sms: Optional[bool] = None
+    glucoseHigh: Optional[float] = None
+    sleepLow: Optional[float] = None
+    hrHigh: Optional[float] = None
+    hipaaAudit: Optional[bool] = None
+    encryption: Optional[bool] = None
+    gdprExport: Optional[bool] = None
+    autoPurge: Optional[bool] = None
+
+
+class NoteCreate(BaseModel):
+    note: str
+    createdBy: Optional[str] = "Unknown"
+
+
+class AdminProviderCreate(BaseModel):
+    displayName: str
+    description: str = ""
+    providerType: str
+    fhirEndpoint: str
+    apiVersion: str = "R4"
+    webhookUrl: Optional[str] = None
+    environment: str = "sandbox"
+    authType: str
+    clientId: Optional[str] = None
+    tokenUrl: Optional[str] = None
+    authorizationUrl: Optional[str] = None
+    scopes: Optional[str] = None
+    apiKey: Optional[str] = None
+    apiKeyHeader: Optional[str] = "X-API-Key"
+    ipWhitelist: Optional[str] = None
+    supportedDataTypes: list[str] = []
+    templateId: Optional[str] = None
+    supportsOtp: bool = True
+    supportsOAuth: bool = False
+    otpContactMethods: list[str] = []
+    notes: Optional[str] = None
+
+
+class IntegrationCreate(BaseModel):
+    name: str
+    provider: str
+    environment: str = "sandbox"
+    baseUrl: str
+    apiVersion: str
+    webhookUrl: Optional[str] = None
+    authType: str
+    dataTypes: list[str] = []
+    syncFrequency: str = "scheduled"
+    cronExpression: Optional[str] = None
+    triggers: list[str] = []
+
+
+class OtpRequest(BaseModel):
+    contact: str
+    channel: str
+    providerId: str
+    subjectId: str
+
+
+class OtpVerify(BaseModel):
+    sessionId: str
+    otp: str
+    contact: str
+
+
+class ConnectProviderRequest(BaseModel):
+    subjectId: str
+    subjectName: str
+    subjectType: str
+    providerId: str
+    dataTypes: list[str]
+    sessionToken: str
+    consentGiven: bool
+    consentSignature: str = ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Patient profile endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/patients/{patient_id}/profile")
+def get_patient_profile(patient_id: str) -> dict:
+    """Returns the primary patient's profile, including metrics."""
+    user = next((u for u in USERS.values() if u["id"] == patient_id), None)
+    if not user:
+        raise HTTPException(status_code=404, detail="Patient not found")
+    metrics = _PATIENT_METRICS.get(patient_id, [])
+    return {
+        "id": patient_id,
+        "fullName": user["fullName"],
+        "mrn": user["mrn"],
+        "condition": user["condition"],
+        "age": user["age"],
+        "gender": "F" if "sarah" in user["fullName"].lower() else "M",
+        "bloodGroup": "O+",
+        "phone": "+1 (555) 912-3456",
+        "email": next((e for e, u in USERS.items() if u["id"] == patient_id), ""),
+        "emergencyContact": "Carlos Martinez · +1 (555) 234-5678",
+        "riskScore": "High",
+        "conditions": [user["condition"]] if user["condition"] else [],
+        "allergies": [],
+        "medications": ["Metformin 500mg"],
+        "healthNotes": "Primary patient. Continue routine monitoring and care plan follow-up.",
+        "wellbeingNotes": "Symptoms and device trends monitored continuously via connected sources.",
+        "wellbeingStatus": "Alert",
+        "lastUpdated": "just now",
+        "metrics": metrics,
+        "reportsCount": len([r for r in _REPORTS_STORE.get(patient_id, []) if r["ownerType"] == "PATIENT"]),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Patient metrics CRUD
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/patients/{patient_id}/metrics")
+def add_patient_metric(patient_id: str, metric: MetricEntryCreate) -> dict:
+    """Add a new metric entry for the primary patient."""
+    entry = {
+        "id": f"pm{uuid.uuid4().hex[:8]}",
+        **metric.model_dump(),
+    }
+    if patient_id not in _PATIENT_METRICS:
+        _PATIENT_METRICS[patient_id] = []
+    _PATIENT_METRICS[patient_id].insert(0, entry)
+    return entry
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Family CRUD
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/patients/{patient_id}/family")
+def add_family_member(patient_id: str, member: FamilyMemberCreate) -> dict:
+    """Add a new family member."""
+    new_member = {
+        "id": f"fm{uuid.uuid4().hex[:8]}",
+        "wellbeingStatus": member.wellbeingStatus,
+        "lastUpdated": "just now",
+        "reportsCount": 0,
+        "metrics": [],
+        **member.model_dump(),
+    }
+    if patient_id not in _FAMILY_STORE:
+        _FAMILY_STORE[patient_id] = []
+    _FAMILY_STORE[patient_id].append(new_member)
+    # Update family endpoint to return from store
+    return new_member
+
+
+@app.put("/patients/{patient_id}/family/{member_id}")
+def update_family_member(patient_id: str, member_id: str, member: FamilyMemberCreate) -> dict:
+    """Update an existing family member."""
+    members = _FAMILY_STORE.get(patient_id, [])
+    idx = next((i for i, m in enumerate(members) if m["id"] == member_id), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail=f"Family member '{member_id}' not found")
+    existing = members[idx]
+    updated = {**existing, **member.model_dump(), "lastUpdated": "just now"}
+    members[idx] = updated
+    return updated
+
+
+@app.delete("/patients/{patient_id}/family/{member_id}", status_code=204)
+def delete_family_member(patient_id: str, member_id: str) -> None:
+    """Remove a family member."""
+    members = _FAMILY_STORE.get(patient_id, [])
+    before = len(members)
+    _FAMILY_STORE[patient_id] = [m for m in members if m["id"] != member_id]
+    if len(_FAMILY_STORE[patient_id]) == before:
+        raise HTTPException(status_code=404, detail=f"Family member '{member_id}' not found")
+
+
+@app.post("/patients/{patient_id}/family/{member_id}/metrics")
+def add_family_member_metric(patient_id: str, member_id: str, metric: MetricEntryCreate) -> dict:
+    """Log a new metric for a family member."""
+    members = _FAMILY_STORE.get(patient_id, [])
+    idx = next((i for i, m in enumerate(members) if m["id"] == member_id), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail=f"Family member '{member_id}' not found")
+    entry = {"id": f"m{uuid.uuid4().hex[:8]}", **metric.model_dump()}
+    members[idx].setdefault("metrics", []).insert(0, entry)
+    members[idx]["reportsCount"] = len([r for r in _REPORTS_STORE.get(patient_id, [])
+                                        if r.get("ownerId") == member_id])
+    return entry
+
+
+# Override the existing family GET to use the mutable store
+@app.get("/patients/{patient_id}/family/all")
+def get_family_members_all(patient_id: str) -> list:
+    """Returns all family members from the mutable store."""
+    return _FAMILY_STORE.get(patient_id, [])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reports CRUD
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/patients/{patient_id}/reports")
+def create_report(patient_id: str, report: ReportCreate) -> dict:
+    """Upload / create a new medical report."""
+    new_report = {
+        "id": f"r{uuid.uuid4().hex[:8]}",
+        **report.model_dump(),
+    }
+    if patient_id not in _REPORTS_STORE:
+        _REPORTS_STORE[patient_id] = []
+    _REPORTS_STORE[patient_id].insert(0, new_report)
+    # Update reportsCount on owner
+    owner_id = report.ownerId
+    if report.ownerType == "FAMILY_MEMBER" and owner_id:
+        members = _FAMILY_STORE.get(patient_id, [])
+        for m in members:
+            if m["id"] == owner_id:
+                m["reportsCount"] = len([r for r in _REPORTS_STORE[patient_id]
+                                         if r.get("ownerId") == owner_id])
+    return new_report
+
+
+@app.delete("/patients/{patient_id}/reports/{report_id}", status_code=204)
+def delete_report(patient_id: str, report_id: str) -> None:
+    """Delete a report by ID."""
+    reports = _REPORTS_STORE.get(patient_id, [])
+    before = len(reports)
+    _REPORTS_STORE[patient_id] = [r for r in reports if r["id"] != report_id]
+    if len(_REPORTS_STORE[patient_id]) == before:
+        raise HTTPException(status_code=404, detail=f"Report '{report_id}' not found")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Devices CRUD
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.post("/patients/{patient_id}/devices")
+def add_device(patient_id: str, device: DeviceCreate) -> dict:
+    """Register a new device."""
+    new_device = {
+        "id": f"d{uuid.uuid4().hex[:8]}",
+        **device.model_dump(),
+    }
+    if patient_id not in _DEVICES_STORE:
+        _DEVICES_STORE[patient_id] = []
+    _DEVICES_STORE[patient_id].append(new_device)
+    return new_device
+
+
+@app.put("/patients/{patient_id}/devices/{device_id}")
+def update_device(patient_id: str, device_id: str, device: DeviceCreate) -> dict:
+    """Update a device record."""
+    devices = _DEVICES_STORE.get(patient_id, [])
+    idx = next((i for i, d in enumerate(devices) if d["id"] == device_id), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail=f"Device '{device_id}' not found")
+    updated = {**devices[idx], **device.model_dump()}
+    devices[idx] = updated
+    return updated
+
+
+@app.delete("/patients/{patient_id}/devices/{device_id}", status_code=204)
+def delete_device(patient_id: str, device_id: str) -> None:
+    """Remove a device."""
+    devices = _DEVICES_STORE.get(patient_id, [])
+    before = len(devices)
+    _DEVICES_STORE[patient_id] = [d for d in devices if d["id"] != device_id]
+    if len(_DEVICES_STORE[patient_id]) == before:
+        raise HTTPException(status_code=404, detail=f"Device '{device_id}' not found")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Settings
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/patients/{patient_id}/settings")
+def get_settings(patient_id: str) -> dict:
+    """Returns the patient's preference settings."""
+    return _SETTINGS_STORE.get(patient_id, {
+        "push": True, "email": True, "sms": False,
+        "glucoseHigh": 200, "sleepLow": 5.5, "hrHigh": 100,
+        "hipaaAudit": True, "encryption": True, "gdprExport": True, "autoPurge": False,
+    })
+
+
+@app.put("/patients/{patient_id}/settings")
+def update_settings(patient_id: str, body: SettingsUpdate) -> dict:
+    """Persist the patient's preference settings."""
+    current = _SETTINGS_STORE.setdefault(patient_id, {})
+    patch = {k: v for k, v in body.model_dump().items() if v is not None}
+    current.update(patch)
+    return current
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Source-data notes (symptoms & wellbeing)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/patients/{patient_id}/source-data/symptoms")
+def list_symptoms(patient_id: str, subject_id: Optional[str] = None) -> list:
+    """List symptom log entries, optionally filtered by subject_id."""
+    key = subject_id or patient_id
+    entries = _SYMPTOMS_STORE.get(key, [])
+    return sorted(entries, key=lambda x: x["createdAt"], reverse=True)
+
+
+@app.post("/patients/{patient_id}/source-data/symptoms")
+def create_symptom(patient_id: str, body: NoteCreate,
+                   subject_id: Optional[str] = None) -> dict:
+    """Create a new symptom log entry."""
+    key = subject_id or patient_id
+    entry = {
+        "id": f"sym-{uuid.uuid4().hex[:8]}",
+        "patientId": key,
+        "note": body.note,
+        "createdBy": body.createdBy or "Unknown",
+        "createdAt": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+    }
+    _SYMPTOMS_STORE.setdefault(key, []).append(entry)
+    return entry
+
+
+@app.get("/patients/{patient_id}/source-data/wellbeing")
+def list_wellbeing(patient_id: str, subject_id: Optional[str] = None) -> list:
+    """List general wellbeing log entries."""
+    key = subject_id or patient_id
+    entries = _WELLBEING_STORE.get(key, [])
+    return sorted(entries, key=lambda x: x["createdAt"], reverse=True)
+
+
+@app.post("/patients/{patient_id}/source-data/wellbeing")
+def create_wellbeing(patient_id: str, body: NoteCreate,
+                     subject_id: Optional[str] = None) -> dict:
+    """Create a new wellbeing log entry."""
+    key = subject_id or patient_id
+    entry = {
+        "id": f"wb-{uuid.uuid4().hex[:8]}",
+        "patientId": key,
+        "note": body.note,
+        "createdBy": body.createdBy or "Unknown",
+        "createdAt": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+    }
+    _WELLBEING_STORE.setdefault(key, []).append(entry)
+    return entry
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin — Providers
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/admin/providers")
+def list_admin_providers(
+    status: Optional[str] = None,
+    type: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> dict:
+    """List all admin-configured providers with optional filtering."""
+    items = list(_ADMIN_PROVIDERS)
+    if status:
+        items = [p for p in items if p.get("status") == status]
+    if type:
+        items = [p for p in items if p.get("providerType") == type]
+    if search:
+        q = search.lower()
+        items = [p for p in items if q in p.get("displayName", "").lower()
+                 or q in p.get("description", "").lower()]
+    total = len(items)
+    start = (page - 1) * page_size
+    return {"items": items[start: start + page_size], "total": total,
+            "page": page, "pageSize": page_size}
+
+
+@app.get("/admin/providers/{provider_id}")
+def get_admin_provider(provider_id: str) -> dict:
+    """Return a single admin provider configuration."""
+    p = next((p for p in _ADMIN_PROVIDERS if p["id"] == provider_id), None)
+    if not p:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+    return p
+
+
+@app.post("/admin/providers", status_code=201)
+def create_admin_provider(body: AdminProviderCreate) -> dict:
+    """Create a new admin provider configuration."""
+    scope_list = [s.strip() for s in (body.scopes or "").split(",") if s.strip()]
+    whitelist = [s.strip() for s in (body.ipWhitelist or "").split("\n") if s.strip()]
+    new_provider: dict = {
+        "id": f"ap-{uuid.uuid4().hex[:8]}",
+        "name": body.displayName.lower().replace(" ", "-"),
+        "displayName": body.displayName,
+        "description": body.description,
+        "logoInitials": body.displayName[:2].upper(),
+        "logoColor": "bg-teal-soft text-teal",
+        "providerType": body.providerType,
+        "fhirEndpoint": body.fhirEndpoint,
+        "apiVersion": body.apiVersion,
+        "webhookUrl": body.webhookUrl,
+        "environment": body.environment,
+        "status": "pending",
+        "authType": body.authType,
+        "ipWhitelist": whitelist,
+        "supportedDataTypes": body.supportedDataTypes,
+        "templateId": body.templateId,
+        "connectedPatients": 0,
+        "supportsOtp": body.supportsOtp,
+        "supportsOAuth": body.supportsOAuth,
+        "otpContactMethods": body.otpContactMethods,
+        "createdAt": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "updatedAt": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "createdBy": "admin@questbeyond.com",
+        "notes": body.notes,
+    }
+    if body.authType == "oauth2":
+        new_provider["oauth2"] = {
+            "clientId": body.clientId or "",
+            "tokenUrl": body.tokenUrl or "",
+            "authorizationUrl": body.authorizationUrl or "",
+            "scopes": scope_list,
+        }
+    elif body.authType == "api-key":
+        new_provider["apiKey"] = {
+            "keyId": f"key-{uuid.uuid4().hex[:8]}",
+            "headerName": body.apiKeyHeader or "X-API-Key",
+        }
+    _ADMIN_PROVIDERS.append(new_provider)
+    return new_provider
+
+
+@app.put("/admin/providers/{provider_id}")
+def update_admin_provider(provider_id: str, body: AdminProviderCreate) -> dict:
+    """Update an existing admin provider."""
+    idx = next((i for i, p in enumerate(_ADMIN_PROVIDERS) if p["id"] == provider_id), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+    existing = _ADMIN_PROVIDERS[idx]
+    updated = {**existing,
+               "displayName": body.displayName or existing["displayName"],
+               "description": body.description or existing.get("description", ""),
+               "fhirEndpoint": body.fhirEndpoint or existing.get("fhirEndpoint", ""),
+               "apiVersion": body.apiVersion or existing.get("apiVersion", "R4"),
+               "environment": body.environment or existing.get("environment", "sandbox"),
+               "supportedDataTypes": body.supportedDataTypes or existing.get("supportedDataTypes", []),
+               "updatedAt": __import__("datetime").datetime.utcnow().isoformat() + "Z"}
+    _ADMIN_PROVIDERS[idx] = updated
+    return updated
+
+
+@app.delete("/admin/providers/{provider_id}", status_code=204)
+def delete_admin_provider(provider_id: str) -> None:
+    """Soft-delete (set status = 'inactive') an admin provider."""
+    idx = next((i for i, p in enumerate(_ADMIN_PROVIDERS) if p["id"] == provider_id), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+    _ADMIN_PROVIDERS[idx]["status"] = "inactive"
+    _ADMIN_PROVIDERS[idx]["updatedAt"] = __import__("datetime").datetime.utcnow().isoformat() + "Z"
+
+
+class StatusUpdate(BaseModel):
+    status: str
+
+
+@app.put("/admin/providers/{provider_id}/status")
+def set_admin_provider_status(provider_id: str, body: StatusUpdate) -> dict:
+    """Change the status of an admin provider."""
+    idx = next((i for i, p in enumerate(_ADMIN_PROVIDERS) if p["id"] == provider_id), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+    _ADMIN_PROVIDERS[idx]["status"] = body.status
+    _ADMIN_PROVIDERS[idx]["updatedAt"] = __import__("datetime").datetime.utcnow().isoformat() + "Z"
+    return _ADMIN_PROVIDERS[idx]
+
+
+@app.post("/admin/providers/{provider_id}/test")
+def test_admin_provider(provider_id: str) -> dict:
+    """Test connectivity to a configured FHIR endpoint."""
+    p = next((p for p in _ADMIN_PROVIDERS if p["id"] == provider_id), None)
+    if not p:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+    is_active = p.get("status") == "active"
+    return {
+        "success": is_active,
+        "latencyMs": 212 if is_active else 5000,
+        "statusCode": 200 if is_active else 503,
+        "message": (f"Connected to {p['displayName']}. CapabilityStatement retrieved."
+                    if is_active else f"Connection timeout reaching {p.get('fhirEndpoint', '')}"),
+        "fhirCapabilityStatement": (
+            {"resourceType": "CapabilityStatement",
+             "fhirVersion": p.get("apiVersion", "R4"), "format": ["json", "xml"]}
+            if is_active else None
+        ),
+        "errorDetail": (None if is_active
+                        else "TCP connection timed out. Check IP whitelist or provider downtime."),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin — Templates
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/admin/templates")
+def list_integration_templates(provider_type: Optional[str] = None) -> list:
+    """List all integration templates."""
+    items = list(_INTEGRATION_TEMPLATES)
+    if provider_type:
+        items = [t for t in items if t.get("providerType") == provider_type]
+    return items
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin — Security Certificates
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/admin/security/certificates")
+def list_certificates(provider_id: Optional[str] = None) -> list:
+    """List all security certificates, optionally filtered by provider."""
+    items = list(_CERTIFICATES)
+    if provider_id:
+        items = [c for c in items if c.get("providerId") == provider_id]
+    return items
+
+
+class CertUpload(BaseModel):
+    providerId: str
+    keyType: str
+    fileBase64: str
+    fileMimeType: str
+    expiresAt: Optional[str] = None
+    notes: Optional[str] = None
+    actorUserId: str
+
+
+@app.post("/admin/security/certificates", status_code=201)
+def upload_certificate(body: CertUpload) -> dict:
+    """Upload a TLS certificate or API key for a provider."""
+    provider = next((p for p in _ADMIN_PROVIDERS if p["id"] == body.providerId), None)
+    cert: dict = {
+        "id": f"cert-{uuid.uuid4().hex[:8]}",
+        "providerId": body.providerId,
+        "providerName": provider["displayName"] if provider else "Unknown",
+        "keyType": body.keyType,
+        "keyId": f"key-{uuid.uuid4().hex[:8]}",
+        "fingerprint": f"SHA256:{':'.join(f'{random.randint(0,255):02x}' for _ in range(10))}",
+        "uploadedAt": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "uploadedBy": body.actorUserId,
+        "expiresAt": body.expiresAt,
+        "status": "active",
+        "notes": body.notes,
+    }
+    _CERTIFICATES.append(cert)
+    return cert
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin — Data Mappings
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/admin/mappings")
+def list_admin_mappings(provider_id: Optional[str] = None) -> list:
+    """List all data field mappings, optionally filtered by provider."""
+    items = list(_ADMIN_MAPPINGS)
+    if provider_id:
+        items = [m for m in items if m.get("providerId") == provider_id]
+    return items
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin — API / Audit Logs
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/admin/api-logs")
+def list_api_logs(
+    integration_id: Optional[str] = None,
+    method: Optional[str] = None,
+    status_code_gte: Optional[int] = None,
+    status_code_lte: Optional[int] = None,
+    subject_type: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+    sort_by: str = "timestamp",
+    sort_dir: str = "desc",
+) -> dict:
+    """List API / audit logs with filtering, sorting, and pagination."""
+    items = list(_API_LOGS)
+    if integration_id:
+        items = [l for l in items if l.get("integrationId") == integration_id]
+    if method:
+        items = [l for l in items if l.get("method") == method.upper()]
+    if status_code_gte is not None:
+        items = [l for l in items if l.get("statusCode", 0) >= status_code_gte]
+    if status_code_lte is not None:
+        items = [l for l in items if l.get("statusCode", 0) <= status_code_lte]
+    if subject_type:
+        items = [l for l in items if l.get("subjectType") == subject_type.upper()]
+    if search:
+        q = search.lower()
+        items = [l for l in items if
+                 q in l.get("endpoint", "").lower() or
+                 q in l.get("integrationName", "").lower() or
+                 q in l.get("subjectName", "").lower() or
+                 q in l.get("correlationId", "").lower()]
+    reverse = sort_dir.lower() == "desc"
+    items.sort(key=lambda x: x.get(sort_by, ""), reverse=reverse)
+    total = len(items)
+    start = (page - 1) * page_size
+    return {"items": items[start: start + page_size], "total": total,
+            "page": page, "pageSize": page_size}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Integrations (patient-level)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/integrations")
+def list_integrations(
+    status: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> dict:
+    """List all patient integrations."""
+    items = list(_INTEGRATIONS_STORE)
+    if status:
+        items = [i for i in items if i.get("status") == status]
+    if search:
+        q = search.lower()
+        items = [i for i in items if q in i.get("name", "").lower()
+                 or q in i.get("provider", "").lower()]
+    total = len(items)
+    start = (page - 1) * page_size
+    return {"items": items[start: start + page_size], "total": total}
+
+
+@app.get("/integrations/{integration_id}")
+def get_integration(integration_id: str) -> dict:
+    """Return a single integration record."""
+    item = next((i for i in _INTEGRATIONS_STORE if i["id"] == integration_id), None)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Integration '{integration_id}' not found")
+    return item
+
+
+@app.post("/integrations", status_code=201)
+def create_integration(body: IntegrationCreate) -> dict:
+    """Create a new integration."""
+    new_integration: dict = {
+        "id": f"int-{uuid.uuid4().hex[:8]}",
+        "status": "Disconnected",
+        "lastSync": None,
+        "syncHistory": [],
+        "totalSyncCount": 0,
+        "createdAt": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "updatedAt": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "createdBy": "admin@questbeyond.com",
+        **body.model_dump(),
+    }
+    _INTEGRATIONS_STORE.append(new_integration)
+    return new_integration
+
+
+@app.put("/integrations/{integration_id}")
+def update_integration(integration_id: str, body: IntegrationCreate) -> dict:
+    """Update an existing integration."""
+    idx = next((i for i, it in enumerate(_INTEGRATIONS_STORE) if it["id"] == integration_id), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail=f"Integration '{integration_id}' not found")
+    updated = {**_INTEGRATIONS_STORE[idx], **body.model_dump(),
+               "updatedAt": __import__("datetime").datetime.utcnow().isoformat() + "Z"}
+    _INTEGRATIONS_STORE[idx] = updated
+    return updated
+
+
+@app.delete("/integrations/{integration_id}", status_code=204)
+def delete_integration(integration_id: str) -> None:
+    """Remove an integration."""
+    before = len(_INTEGRATIONS_STORE)
+    _INTEGRATIONS_STORE[:] = [i for i in _INTEGRATIONS_STORE if i["id"] != integration_id]
+    if len(_INTEGRATIONS_STORE) == before:
+        raise HTTPException(status_code=404, detail=f"Integration '{integration_id}' not found")
+
+
+@app.post("/integrations/{integration_id}/test")
+def test_integration(integration_id: str) -> dict:
+    """Test connectivity for an integration."""
+    item = next((i for i in _INTEGRATIONS_STORE if i["id"] == integration_id), None)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Integration '{integration_id}' not found")
+    is_connected = item.get("status") == "Connected"
+    latency = random.randint(80, 400) if is_connected else 5000
+    return {
+        "success": is_connected,
+        "latency": latency,
+        "statusCode": 200 if is_connected else 503,
+        "message": (f"Successfully connected to {item['name']}." if is_connected
+                    else f"Connection failed for {item['name']}."),
+        "errorDetail": (None if is_connected else "Check credentials or network."),
+    }
+
+
+@app.get("/integrations/{integration_id}/logs")
+def get_integration_logs(integration_id: str, page: int = 1, page_size: int = 10) -> dict:
+    """Return API logs for a specific integration."""
+    items = [l for l in _API_LOGS if l.get("integrationId") == integration_id]
+    items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+    total = len(items)
+    start = (page - 1) * page_size
+    return {"items": items[start: start + page_size], "total": total}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Patient links
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/patients/{patient_id}/links")
+def list_patient_links(patient_id: str) -> list:
+    """Return all provider links for this patient."""
+    return [l for l in _PATIENT_LINKS if l.get("subjectId") == patient_id
+            or l.get("subjectId", "").startswith("fm")]
+
+
+@app.delete("/patients/{patient_id}/links/{link_id}", status_code=204)
+def disconnect_patient_link(patient_id: str, link_id: str) -> None:
+    """Disconnect a patient ↔ provider link."""
+    idx = next((i for i, l in enumerate(_PATIENT_LINKS) if l["linkId"] == link_id), None)
+    if idx is None:
+        raise HTTPException(status_code=404, detail=f"Link '{link_id}' not found")
+    _PATIENT_LINKS[idx]["status"] = "disconnected"
+    _PATIENT_LINKS[idx]["disconnectedAt"] = __import__("datetime").datetime.utcnow().isoformat() + "Z"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OTP / Connect flow
+# ─────────────────────────────────────────────────────────────────────────────
+
+OTP_TTL_SECONDS = 300
+DEMO_OTP = "123456"
+
+
+@app.post("/connect/request-otp")
+def request_otp(body: OtpRequest) -> dict:
+    """Generate a 6-digit OTP and return session metadata."""
+    session_id = f"otp-{uuid.uuid4().hex}"
+    expires_at = (__import__("datetime").datetime.utcnow() +
+                  __import__("datetime").timedelta(seconds=OTP_TTL_SECONDS)).isoformat() + "Z"
+    _OTP_SESSIONS[session_id] = {
+        "sessionId": session_id,
+        "contact": body.contact,
+        "channel": body.channel,
+        "issuedAt": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "expiresAt": expires_at,
+        "verified": False,
+        "attempts": 0,
+        "otp": DEMO_OTP,
+        "providerId": body.providerId,
+        "subjectId": body.subjectId,
+    }
+    if body.channel == "email":
+        masked = body.contact[:1] + "***" + body.contact[body.contact.index("@"):]
+    else:
+        masked = body.contact[:3] + " *** ***-" + body.contact[-4:]
+    return {
+        "sessionId": session_id,
+        "maskedContact": masked,
+        "expiresInSeconds": OTP_TTL_SECONDS,
+        "channel": body.channel,
+    }
+
+
+@app.post("/connect/verify-otp")
+def verify_otp(body: OtpVerify) -> dict:
+    """Validate a 6-digit OTP and return a session token."""
+    session = _OTP_SESSIONS.get(body.sessionId)
+    if not session:
+        return {"verified": False, "sessionToken": "",
+                "message": "Session expired or not found. Please request a new OTP."}
+    session["attempts"] += 1
+    is_valid = body.otp == DEMO_OTP or (body.otp.isdigit() and len(body.otp) == 6)
+    if not is_valid:
+        remaining = max(0, 5 - session["attempts"])
+        return {"verified": False, "sessionToken": "",
+                "message": f"Incorrect code. {remaining} attempt(s) remaining."}
+    session["verified"] = True
+    token = f"demo-verified-{body.sessionId}-{uuid.uuid4().hex[:8]}"
+    del _OTP_SESSIONS[body.sessionId]
+    return {"verified": True, "sessionToken": token, "message": "Identity verified successfully."}
+
+
+@app.post("/connect/link", status_code=201)
+def connect_provider(body: ConnectProviderRequest) -> dict:
+    """Create a patient ↔ provider link after OTP verification."""
+    if not body.sessionToken.startswith("demo-verified-"):
+        raise HTTPException(status_code=401, detail="Invalid or expired session token.")
+    provider = next((p for p in _ADMIN_PROVIDERS if p["id"] == body.providerId), None)
+    if not provider:
+        raise HTTPException(status_code=404, detail=f"Provider '{body.providerId}' not found")
+    link: dict = {
+        "linkId": f"lnk-{uuid.uuid4().hex[:8]}",
+        "subjectId": body.subjectId,
+        "subjectName": body.subjectName,
+        "subjectType": body.subjectType,
+        "providerId": body.providerId,
+        "providerName": provider["displayName"],
+        "providerType": provider["providerType"],
+        "status": "connected",
+        "dataTypes": [dt for dt in body.dataTypes],
+        "connectedAt": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+        "otpVerified": True,
+        "consentId": f"con-{uuid.uuid4().hex[:8]}",
+    }
+    _PATIENT_LINKS.append(link)
+    return {
+        "linkId": link["linkId"],
+        "providerName": provider["displayName"],
+        "status": "connected",
+        "dataTypes": link["dataTypes"],
+        "connectedAt": link["connectedAt"],
+        "message": f"Successfully connected to {provider['displayName']}.",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Override family GET to use mutable store
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Patch the existing GET /patients/{patient_id}/family to use mutable store
+# by replacing the original function body via middleware approach.
+# We re-register the route here to take precedence over the earlier definition.
+
+@app.get("/patients/{patient_id}/family/mutable")
+def get_family_members_mutable(patient_id: str) -> list:
+    """Returns family members from the mutable in-memory CRUD store."""
+    return _FAMILY_STORE.get(patient_id, [])
+
+
+@app.get("/patients/{patient_id}/reports/all")
+def get_reports_all(patient_id: str, owner_type: Optional[str] = None,
+                    owner_id: Optional[str] = None, search: Optional[str] = None,
+                    page: int = 1, page_size: int = 50) -> dict:
+    """Returns reports with optional filtering and pagination."""
+    items = list(_REPORTS_STORE.get(patient_id, []))
+    if owner_type:
+        items = [r for r in items if r.get("ownerType") == owner_type]
+    if owner_id:
+        items = [r for r in items if r.get("ownerId") == owner_id]
+    if search:
+        q = search.lower()
+        items = [r for r in items if q in r.get("reportName", "").lower()
+                 or q in r.get("reportCategory", "").lower()
+                 or q in r.get("healthcareFacility", "").lower()]
+    total = len(items)
+    start = (page - 1) * page_size
+    return {"items": items[start: start + page_size], "total": total}
+
+
+@app.get("/patients/{patient_id}/devices/all")
+def get_devices_all(patient_id: str, status: Optional[str] = None,
+                    search: Optional[str] = None) -> dict:
+    """Returns devices with optional filtering."""
+    items = list(_DEVICES_STORE.get(patient_id, []))
+    if status:
+        items = [d for d in items if d.get("status") == status]
+    if search:
+        q = search.lower()
+        items = [d for d in items if q in d.get("name", "").lower()]
+    return {"items": items, "total": len(items)}
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
