@@ -1,0 +1,631 @@
+OpenAPI Specifications
+
+1. Ingestion Service API (ingestion-openapi.yaml)
+
+```yaml
+openapi: 3.0.3
+info:
+  title: Quest Beyond - Ingestion Service API
+  description: Accepts patient-generated health data from wearables, home tests, and symptoms
+  version: 2.0.0
+  contact:
+    name: Quest Beyond Engineering
+    email: api@questbeyond.com
+
+servers:
+  - url: https://api.questbeyond.com/v1
+    description: Production
+  - url: http://localhost:8002/v1
+    description: Local development
+
+security:
+  - ApiKeyAuth: []
+  - BearerAuth: []
+
+tags:
+  - name: Ingestion
+    description: Submit health data points
+  - name: Batch
+    description: Bulk data submission
+  - name: Webhook
+    description: Vendor webhook receivers
+
+paths:
+  /ingest:
+    post:
+      tags: [Ingestion]
+      summary: Ingest a single health data point
+      operationId: ingestDataPoint
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: '#/components/schemas/WearableData'
+                - $ref: '#/components/schemas/HomeTest'
+                - $ref: '#/components/schemas/SymptomLog'
+                - $ref: '#/components/schemas/SDOHSurvey'
+      responses:
+        '202':
+          description: Accepted for processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IngestionResponse'
+        '400':
+          description: Schema validation failed
+        '401':
+          description: Invalid API key
+        '429':
+          description: Rate limit exceeded
+          headers:
+            X-RateLimit-Reset:
+              schema:
+                type: integer
+
+  /ingest/batch:
+    post:
+      tags: [Batch]
+      summary: Batch ingest up to 1000 data points
+      operationId: ingestBatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - patientId
+                - data
+              properties:
+                patientId:
+                  type: string
+                  format: uuid
+                data:
+                  type: array
+                  maxItems: 1000
+                  items:
+                    oneOf:
+                      - $ref: '#/components/schemas/WearableData'
+                      - $ref: '#/components/schemas/HomeTest'
+                      - $ref: '#/components/schemas/SymptomLog'
+      responses:
+        '202':
+          description: Batch accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchResponse'
+
+  /webhook/{vendor}:
+    post:
+      tags: [Webhook]
+      summary: Vendor-specific webhook receiver (Apple, Fitbit, Dexcom)
+      parameters:
+        - name: vendor
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [apple, fitbit, garmin, dexcom, onetouch]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '202':
+          description: Webhook accepted
+        '400':
+          description: Invalid signature
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    WearableData:
+      type: object
+      required:
+        - patientId
+        - deviceType
+        - timestamp
+        - metrics
+      properties:
+        patientId:
+          type: string
+          format: uuid
+        deviceType:
+          type: string
+          enum: [apple_watch, fitbit, garmin, oura, whoop]
+        deviceId:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        metrics:
+          type: object
+          properties:
+            heartRate:
+              type: integer
+              minimum: 30
+              maximum: 220
+            steps:
+              type: integer
+            sleepHours:
+              type: number
+            hrv:
+              type: integer
+            spo2:
+              type: integer
+              minimum: 70
+              maximum: 100
+            respiratoryRate:
+              type: number
+            ecg:
+              type: object
+              properties:
+                classification:
+                  type: string
+                  enum: [sinus_rhythm, atrial_fibrillation, inconclusive]
+                averageHeartRate:
+                  type: integer
+
+    HomeTest:
+      type: object
+      required:
+        - patientId
+        - testType
+        - result
+        - timestamp
+      properties:
+        patientId:
+          type: string
+          format: uuid
+        testType:
+          type: string
+          enum: [glucose, covid, pregnancy, cholesterol, a1c, ketone, blood_pressure]
+        result:
+          type: object
+          oneOf:
+            - properties:
+                value:
+                  type: number
+                unit:
+                  type: string
+            - properties:
+                value:
+                  type: string
+                  enum: [positive, negative, invalid]
+        deviceName:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    SymptomLog:
+      type: object
+      required:
+        - patientId
+        - symptoms
+        - timestamp
+      properties:
+        patientId:
+          type: string
+          format: uuid
+        symptoms:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                enum: [fatigue, headache, nausea, dizziness, chest_pain, shortness_of_breath, fever, cough, pain]
+              severity:
+                type: integer
+                minimum: 0
+                maximum: 10
+              duration:
+                type: string
+        notes:
+          type: string
+          maxLength: 1000
+        timestamp:
+          type: string
+          format: date-time
+
+    SDOHSurvey:
+      type: object
+      required:
+        - patientId
+        - domain
+        - response
+      properties:
+        patientId:
+          type: string
+          format: uuid
+        domain:
+          type: string
+          enum: [food_security, housing, transportation, social_support, utilities, employment]
+        response:
+          type: object
+          properties:
+            value:
+              type: string
+            riskLevel:
+              type: string
+              enum: [low, moderate, high]
+        notes:
+          type: string
+
+    IngestionResponse:
+      type: object
+      properties:
+        ingestionId:
+          type: string
+        status:
+          type: string
+          enum: [accepted, rejected]
+        message:
+          type: string
+        kafkaOffset:
+          type: integer
+
+    BatchResponse:
+      type: object
+      properties:
+        batchId:
+          type: string
+        acceptedCount:
+          type: integer
+        rejectedCount:
+          type: integer
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              error:
+                type: string
+```
+
+2. Genie AI Service API (genie-openapi.yaml)
+
+```yaml
+openapi: 3.0.3
+info:
+  title: Quest Beyond - Genie AI Service
+  description: Conversational AI with voice capabilities for patient engagement
+  version: 1.0.0
+
+servers:
+  - url: https://api.questbeyond.com/v1/genie
+  - url: ws://localhost:8006
+    description: WebSocket endpoint for voice
+
+paths:
+  /chat:
+    post:
+      summary: Text-based conversation with Genie AI
+      operationId: chat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - patientId
+                - message
+              properties:
+                patientId:
+                  type: string
+                  format: uuid
+                message:
+                  type: string
+                  maxLength: 2000
+                conversationId:
+                  type: string
+                includeContext:
+                  type: boolean
+                  default: true
+      responses:
+        '200':
+          description: AI response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatResponse'
+
+  /summary/{patientId}:
+    get:
+      summary: Generate daily health briefing with audio
+      operationId: getDailySummary
+      parameters:
+        - name: patientId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, audio]
+            default: json
+      responses:
+        '200':
+          description: Daily summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DailySummary'
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+
+  /translate:
+    post:
+      summary: Translate clinical jargon to plain language
+      operationId: translateClinical
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                clinicalText:
+                  type: string
+                targetAudience:
+                  type: string
+                  enum: [patient, caregiver, child]
+                  default: patient
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plainLanguage:
+                    type: string
+                  readingLevel:
+                    type: string
+
+  /action/{patientId}:
+    post:
+      summary: Execute actionable insight (schedule call, order test)
+      operationId: executeAction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                actionType:
+                  type: string
+                  enum: [schedule_telehealth, order_lab, send_reminder, escalate_to_provider]
+                parameters:
+                  type: object
+      responses:
+        '200':
+          description: Action executed
+
+components:
+  schemas:
+    ChatResponse:
+      type: object
+      properties:
+        response:
+          type: string
+        conversationId:
+          type: string
+        suggestedActions:
+          type: array
+          items:
+            type: string
+        audioUrl:
+          type: string
+        confidence:
+          type: number
+
+    DailySummary:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        audioSummary:
+          type: string
+        highlights:
+          type: array
+          items:
+            type: object
+            properties:
+              metric:
+                type: string
+              value:
+                type: string
+              trend:
+                type: string
+                enum: [up, down, stable]
+        forecast:
+          type: object
+          properties:
+            glucoseRisk:
+              type: integer
+            recommendation:
+              type: string
+        actionItems:
+          type: array
+          items:
+            type: string
+```
+
+3. Forecast Service API (forecast-openapi.yaml)
+
+```yaml
+openapi: 3.0.3
+info:
+  title: Quest Beyond - Forecast Service
+  description: Predictive analytics and forecasting for patient health metrics
+  version: 1.0.0
+
+paths:
+  /forecast/glucose/{patientId}:
+    get:
+      summary: Predict glucose levels for next 24 hours
+      operationId: predictGlucose
+      parameters:
+        - name: patientId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: hours
+          in: query
+          schema:
+            type: integer
+            default: 24
+            maximum: 72
+      responses:
+        '200':
+          description: Glucose predictions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlucoseForecast'
+
+  /forecast/risk/{patientId}:
+    get:
+      summary: Multi-risk assessment
+      operationId: getRiskAssessment
+      parameters:
+        - name: patientId
+          in: path
+          required: true
+      responses:
+        '200':
+          description: Risk scores
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RiskAssessment'
+
+  /forecast/readmission/{patientId}:
+    get:
+      summary: 30-day hospital readmission risk
+      operationId: predictReadmission
+      responses:
+        '200':
+          description: Readmission risk
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadmissionRisk'
+
+  /forecast/trends/{patientId}:
+    get:
+      summary: Multi-metric trend forecast
+      parameters:
+        - name: metrics
+          in: query
+          schema:
+            type: array
+            items:
+              type: string
+              enum: [glucose, blood_pressure, weight, sleep, heart_rate]
+      responses:
+        '200':
+          description: Trend predictions
+
+components:
+  schemas:
+    GlucoseForecast:
+      type: object
+      properties:
+        patientId:
+          type: string
+        predictions:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp:
+                type: string
+                format: date-time
+              value:
+                type: number
+              lowerBound:
+                type: number
+              upperBound:
+                type: number
+        riskOfHypoglycemia:
+          type: integer
+          minimum: 0
+          maximum: 100
+        riskOfHyperglycemia:
+          type: integer
+        recommendations:
+          type: array
+          items:
+            type: string
+        modelVersion:
+          type: string
+
+    RiskAssessment:
+      type: object
+      properties:
+        cardiovascular:
+          type: integer
+        metabolic:
+          type: integer
+        fall:
+          type: integer
+        depression:
+          type: integer
+        lastUpdated:
+          type: string
+          format: date-time
+
+    ReadmissionRisk:
+      type: object
+      properties:
+        riskScore:
+          type: integer
+          minimum: 0
+          maximum: 100
+        riskCategory:
+          type: string
+          enum: [low, moderate, high, critical]
+        factors:
+          type: array
+          items:
+            type: object
+            properties:
+              factor:
+                type: string
+              impact:
+                type: string
+              modifiable:
+                type: boolean
+        interventions:
+          type: array
+          items:
+            type: string

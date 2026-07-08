@@ -1,0 +1,102 @@
+Quest Beyond · Frontend to API Mapping
+
+Complete Mapping Table
+
+# Frontend UI Component User Action API Endpoint Method Request Body / Parameters Backend Processing Response
+DEVICE MANAGEMENT       
+1 Device List View all connected devices /devices GET ?patientId={patientId} Device registry query → returns all devices with metadata 200 OK + device array
+2 "Connect Device" button Initiate OAuth connection /devices POST { "name": "Apple Watch", "type": "wearable", "oauthRedirect": "app://callback" } Creates device record → returns OAuth URL 201 Created + deviceId + oauthUrl
+3 OAuth Callback Complete device authorization /devices/{deviceId}/oauth POST { "code": "auth_code_xyz" } Exchanges code for refresh token → stores securely 200 OK
+4 "Sync Now" button (per device) Force manual sync /sync/{deviceId} POST { "trigger": "manual" } Queues sync job → fetches from device API → normalizes → stores 202 Accepted + syncId
+5 "Remove Device" button Disconnect device /devices/{deviceId} DELETE — Revokes OAuth token → removes device → marks data inactive 204 No Content
+6 Device status indicator Check last sync time /devices/{deviceId}/status GET — Returns last sync timestamp + next scheduled sync 200 OK
+DATA INGESTION       
+7 Home Test Manual Entry Submit glucose/COVID/pregnancy result /ingest POST { "patientId": "uuid", "testType": "glucose", "result": { "value": 235, "unit": "mg/dL" }, "timestamp": "2026-06-12T10:30:00Z" } Validates schema → normalizes units → creates FHIR observation → stores in TimescaleDB 202 Accepted + ingestionId
+8 Batch upload (multiple tests) Upload CSV or multiple entries /ingest/batch POST { "patientId": "uuid", "data": [ { testType, result } ] } Parallel validation → dead letter queue for failures → atomic write 202 Accepted + acceptedCount + rejectedCount
+9 Wearable data push (webhook) Automatic sync from Apple/Fitbit /ingest/webhook/{deviceId} POST Webhook payload from wearable vendor HMAC verification → schema validation → normalization 202 Accepted
+10 Symptom Log Patient reports symptoms /ingest/symptom POST { "patientId": "uuid", "symptoms": [{"name": "fatigue", "severity": 7}], "notes": "since morning" } NLP extraction → structured storage → trend detection 202 Accepted
+11 SDOH Survey Submission Patient completes social determinants form /ingest/sdoh POST { "patientId": "uuid", "domain": "transportation", "response": "no reliable vehicle", "risk_level": "high" } Stores in SDOH schema → triggers care coordinator alert if high risk 202 Accepted
+12 Family/Caregiver observation Text/voice observation via app /ingest/observation POST { "patientId": "uuid", "observer": "caregiver", "text": "Mom forgot to eat breakfast", "timestamp": "..." } NLP classification → adds to timeline → pattern detection 202 Accepted
+TIMELINE & DASHBOARD       
+13 Patient Timeline view Load unified timeline /timeline/{patientId} GET ?startDate=2026-06-01&endDate=2026-06-12&types=wearable,home-test,symptom TimescaleDB time-series query → chronological merge 200 OK + events array
+14 Filter timeline by type Click "Wearables" filter /timeline/{patientId} GET ?types=wearable Same as above with type filter 200 OK
+15 Glucose trend chart Load chart data /trends/glucose/{patientId} GET ?days=7 TimescaleDB continuous aggregates → returns time-series 200 OK + data points
+16 KPI metrics (devices, tests, alerts) Dashboard load /metrics/{patientId} GET — Aggregates counts from device registry + ingestion logs + alert table 200 OK
+ALERTS & NOTIFICATIONS       
+17 Alert list View active alerts /alerts GET ?patientId={patientId}&status=active Alert engine query → returns prioritized alerts 200 OK + alerts array
+18 Acknowledge alert Doctor clicks "Acknowledge" /alerts/{alertId}/acknowledge POST { "providerId": "dr_chen", "notes": "Called patient, adjusted meds" } Updates alert status → logs audit trail → stops notifications 200 OK
+19 Resolve alert Doctor marks as resolved /alerts/{alertId}/resolve POST { "resolution": "medication adjusted" } Closes alert → archives to history 200 OK
+20 Dismiss alert (ignore) Doctor dismisses false alarm /alerts/{alertId}/dismiss POST { "reason": "false_positive" } Marks dismissed → reduces future false positives via ML feedback loop 200 OK
+21 Webhook subscription (provider) Register hospital webhook URL /webhooks/subscribe POST { "url": "https://hospital.com/alerts", "events": ["critical_glucose", "hypertension_trend"], "secret": "hmac_secret" } Stores webhook → validates with challenge request 201 Created + subscriptionId
+FHIR & EHR INTEGRATION       
+22 Export to Epic FHIR Provider clicks "Export to Epic" /export/fhir/{patientId} GET ?startDate=2026-06-01&endDate=2026-06-12 Queries TimescaleDB → transforms to FHIR R4 bundle → returns 200 OK + FHIR Bundle
+23 Push to Epic (SMART on FHIR) Send data directly to EHR /export/fhir/{patientId}/push POST { "fhirEndpoint": "https://epic.healthsystem.org/fhir", "accessToken": "epic_token" } Creates FHIR Bundle → POSTs to Epic endpoint → returns FHIR IDs 202 Accepted + fhirIds
+24 Sync Epic patient list Match patients between QB and Epic /sync/epic/patients POST { "epicPatientIds": ["EPIC001", "EPIC002"] } Cross-walks MRNs → updates patient mapping table 200 OK + matched count
+ANALYTICS & RESEARCH       
+25 Population health dashboard View cohort metrics /analytics/population GET ?cohortId=diabetes&dateRange=last30d BigQuery aggregated query → returns cohort statistics 200 OK + metrics
+26 Research API (de-identified) Download dataset for research /research/dataset GET ?schema=glucose_trends&format=parquet BigQuery export → de-identified by default → signed URL 200 OK + download URL
+27 Provider dashboard (aggregated) View all assigned patients /provider/patients GET ?providerId=dr_chen Returns list of patients with alert counts + last activity 200 OK
+
+---
+
+API Endpoint Group Summary
+
+Group Base Path Methods Description
+Device Management /devices GET, POST, DELETE Register, list, and remove connected devices
+Sync Operations /sync POST Trigger manual or automatic device sync
+Data Ingestion /ingest POST, POST /batch Submit home tests, wearables, symptoms, SDOH
+Timeline & Trends /timeline, /trends GET Retrieve unified patient timeline and trend data
+Alerts /alerts GET, POST Manage clinical alerts and acknowledgments
+FHIR Export /export/fhir GET, POST Export data to FHIR R4 format and push to Epic
+Webhooks /webhooks POST, DELETE Register provider webhook endpoints
+Analytics /analytics, /research GET Population health and research data access
+Provider /provider GET Provider-specific aggregated views
+
+---
+
+Authentication & Headers
+
+Header Value Required Used In
+Authorization Bearer {jwt_token} Yes (all endpoints except webhooks) All API calls
+X-API-Key {api_key} Yes (service-to-service) Ingestion endpoints
+X-Request-ID {uuid} Recommended All endpoints for tracing
+X-Patient-ID {patient_uuid} Yes (contextual endpoints) Timeline, alerts, export
+
+---
+
+Error Response Mapping
+
+HTTP Status Frontend Handling API Response Example
+400 Bad Request Show validation error message { "error": "schema_validation_failed", "details": ["glucose value out of range"] }
+401 Unauthorized Redirect to login { "error": "token_expired", "message": "Please re-authenticate" }
+404 Not Found Show "device not found" { "error": "device_not_found", "deviceId": "d1" }
+429 Too Many Requests Show rate limit message + retry-after { "error": "rate_limit_exceeded", "retryAfter": 30 }
+500 Internal Error Show generic error + incident ID { "error": "internal_server_error", "incidentId": "INC-12345" }
+
+---
+
+Webhook Events (Outbound)
+
+Event Name Trigger Condition Payload Schema
+critical_glucose Glucose >250 or rapid rise >50 mg/dL in 30 min { patient, value, trend, recommendation }
+hypertension_trend BP >140/90 for 3 consecutive days { patient, systolic, diastolic, duration }
+fall_detected Wearable fall detection trigger { patient, timestamp, location (if available) }
+medication_adherence_gap Missed medication detection (2+ days) { patient, medication, daysMissed }
+sleep_apnea_risk SpO2 <88% with frequent desaturations { patient, avgSpO2, desaturationEvents }
+sdoh_intervention_needed High-risk SDOH response (food/housing/transport) { patient, domain, riskLevel, suggestedAction }
+caregiver_concern Family observation flagged as urgent { patient, observation, suggestedFollowup }
+
+---
+
+Rate Limits by Endpoint Category
+
+Endpoint Category Requests per Minute (Production) Requests per Minute (Sandbox) Burst Limit
+/ingest 600 60 1000
+/ingest/batch 100 20 200
+/sync/* 60 15 100
+/devices (GET) 300 50 500
+/devices (POST/DELETE) 30 10 50
+/timeline 300 40 500
+/alerts 200 30 300
+/export/fhir 50 10 100
+/analytics 20 5 40

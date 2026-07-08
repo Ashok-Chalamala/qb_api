@@ -32,3 +32,6 @@ htmlcov/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Google OAuth credentials
+docs/client_secret.json
