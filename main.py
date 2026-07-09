@@ -8,6 +8,8 @@ Run:
     uvicorn main:app --reload --port 8000
 """
 
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -19,16 +21,21 @@ app = FastAPI(
     version="1.0.0",
 )
 
+_DEFAULT_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+]
+# In Cloud Run, set ALLOW_ORIGINS="https://your-frontend.com,https://other.com"
+_extra = [o.strip() for o in os.environ.get("ALLOW_ORIGINS", "").split(",") if o.strip()]
+_origins = _DEFAULT_ORIGINS + _extra
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://localhost:4173",
-        "http://127.0.0.1:5173",
-        "http://localhost:8080",
-        "http://127.0.0.1:8080",
-    ],
+    allow_origins=_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -46,6 +53,19 @@ app.include_router(integrations.router)
 app.include_router(connect.router)
 app.include_router(google_health.router)
 app.include_router(vertex_chat.router)
+
+
+@app.get("/")
+def root() -> dict:
+    """Root endpoint - provides API information and links to documentation."""
+    return {
+        "service": "Quest Beyond API",
+        "version": "1.0.0",
+        "status": "running",
+        "documentation": "/docs",
+        "openapi_schema": "/openapi.json",
+        "health_check": "/health"
+    }
 
 
 @app.get("/health")
